@@ -1,0 +1,95 @@
+Challenges & Technical Discoveries
+Real-time financial networks introduce strict infrastructure constraints not found in standard web apps. Below are the core engineering hurdles encountered and resolved during development:
+1. Defeating the 2-Second Payment Rail Timeout Budget
+The Challenge: Real-time payment networks (Visa/Mastercard via Stripe) enforce a strict 2000ms timeout window on synchronous authorization webhooks. Early testing introduced two compounding latency bottlenecks that shattered this budget: public network routing lag via internet tunnels (ngrok), and blocking database queries where the server waited for Supabase (PostgreSQL) INSERT confirmations before responding to Stripe. This caused transactions to fail automatically on the rail.
+The Resolution: A two-pronged architectural optimization was implemented to squeeze execution time well under the threshold:
+Network Layer: Replaced global public tunnels with the native Stripe CLI client, leveraging its optimized direct event-forwarding daemon to eliminate public internet routing loops.
+Application Layer: Restructured the controller to treat database operations as non-blocking asynchronous tasks. The server immediately fires the compliance handshake (approved: true) back to the banking rail, while the PostgreSQL connection pool writes the transaction logs to Supabase out-of-band as a background worker process.
+2. Synchronous Webhook Compliance & Protocol Version Mirroring
+The Challenge: Unlike 95% of standard webhooks which act as asynchronous notifications, an issuing_authorization.request is a live blocking gateway proxy. Stripe's core routing engine rejected standard Express JSON responses, returning a blank Invalid Stripe API version: protocol error. This occurred because the gateway demands that the application server explicitly prove framework alignment by echoing a version signature in the network transmission headers.
+The Resolution: Programmatically intercepted the exact runtime schema version delivered in the incoming Stripe payload and mirrored it directly back inside the server's HTTP response headers, clearing the gateway's validation wall instantly:
+JavaScript
+const eventVersion = event.api_version || '2023-10-16'; 
+res.setHeader('Stripe-Version', eventVersion);
+res.setHeader('Content-Type', 'application/json');
+
+[💳 Card Swipe / Simulation]
+           │
+           ▼
+┌──────────────────────────┐
+│      Stripe Engine       │ ◄─── (Holds rail open, starts 2s clock)
+└──────────┬───────────────┘
+           │ (Webhook Event Data)
+           ▼
+┌──────────────────────────┐
+│  Stripe CLI Local Daemon │ (Bypasses internet routing lag)
+└──────────┬───────────────┘
+           │ (localhost:3000/webhook)
+           ▼
+┌──────────────────────────┐
+│    Express.js Server     │
+└────┬───────────────┬─────┘
+     │               │
+     │ (Fast-Track)  │ (Async / Off-Rail)
+     ▼               ▼
+┌────────────────┐ ┌──────────────────────────┐
+│  HTTP Response │ │  PostgreSQL Pool Client  │
+│ Status: 200 OK │ │   (Supabase Database)    │
+│ Headers:       │ └─────────────┬────────────┘
+│ Stripe-Version │               │
+│ Body: approved │               ▼
+└────────┬───────┘ ┌──────────────────────────┐
+         │         │ card_authorizations Grid │
+         ▼         └──────────────────────────┘
+[💳 Transaction Cleared]
+
+
+Trigger: A cardholder swipes their card (simulated via the Stripe Developer Dashboard Test Panel).
+Network Forwarding: Stripe fires an issuing_authorization.request event payload. The Stripe CLI Daemon intercepts this event and tunnels it directly down to localhost:3000/webhook via an optimized connection.
+Payload Extraction: The Express.js server parses the metadata to capture critical financial telemetry (amount_cents, merchant_name, cardholder_name, and the active transaction status).
+The Split-Path Strategy:
+Path A (Synchronous Response): The server immediately formats a compliant JSON response, mirrors the necessary Stripe-Version network header, and closes the connection with an approved: true body. This occurs in a fraction of a second, easily beating the 2-second threshold.
+Path B (Asynchronous Log): Concurrently, the server hands the query to the pg connection pool. The script does not wait for PostgreSQL to finish writing before responding to Stripe; instead, the connection pool handles the INSERT query to Supabase completely out-of-band in the background.
+
+Database Schema & Table Setup
+The backend relies on a PostgreSQL instance hosted on Supabase. To track incoming card telemetry without data truncation or type mismatches, the card_authorizations table utilizes precise financial data types (such as tracking currencies in minor-unit integers).
+
+Column Name,Data Type,Constraints,Description
+id,INT4,SERIAL PRIMARY KEY,Auto-incrementing internal record identifier.
+stripe_auth_id,VARCHAR,UNIQUE NOT NULL,The unique iauth_... string generated by Stripe.
+cardholder_name,VARCHAR,NOT NULL,The verified name of the cardholder.
+merchant_name,VARCHAR,NOT NULL,The name of the merchant requesting the funds.
+amount_cents,INT4,NOT NULL,"The transaction volume recorded in cents (e.g., £15.00 = 1500)."
+status,VARCHAR,Default: 'pending',"The real-time evaluation state (pending, closed, declined)."
+decline_reason,VARCHAR,NULLABLE,System-populated audit string if a transaction fails fraud/limits checks.
+created_at,TIMESTAMPTZ,DEFAULT NOW(),Complete timestamp including timezone offsets.
+
+CREATE TABLE card_authorizations (
+    id SERIAL PRIMARY KEY,
+    stripe_auth_id VARCHAR(255) UNIQUE NOT NULL,
+    cardholder_name VARCHAR(255) NOT NULL,
+    merchant_name VARCHAR(255) NOT NULL,
+    amount_cents INTEGER NOT NULL,
+    status VARCHAR(50) DEFAULT 'pending',
+    decline_reason VARCHAR(255),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Index critical lookup columns to ensure high-speed querying as the dataset grows
+CREATE INDEX idx_stripe_auth_id ON card_authorizations(stripe_auth_id);
+
+
+Challenges & Technical Discoveries
+Real-time financial networks introduce strict infrastructure constraints not found in standard web apps. Below are the core engineering hurdles encountered and resolved during development:
+1. Defeating the 2-Second Payment Rail Timeout Budget
+The Challenge: Real-time payment networks (Visa/Mastercard via Stripe) enforce a strict 2000ms timeout window on synchronous authorization webhooks. Early testing introduced two compounding latency bottlenecks that shattered this budget: public network routing lag via internet tunnels (ngrok), and blocking database queries where the server waited for Supabase (PostgreSQL) INSERT confirmations before responding to Stripe. This caused transactions to fail automatically on the rail.
+The Resolution: A two-pronged architectural optimization was implemented to squeeze execution time well under the threshold:
+Network Layer: Replaced global public tunnels with the native Stripe CLI client, leveraging its optimized direct event-forwarding daemon to eliminate public internet routing loops.
+Application Layer: Restructured the controller to treat database operations as non-blocking asynchronous tasks. The server immediately fires the compliance handshake (approved: true) back to the banking rail, while the PostgreSQL connection pool writes the transaction logs to Supabase out-of-band as a background worker process.
+2. Synchronous Webhook Compliance & Protocol Version Mirroring
+The Challenge: Unlike 95% of standard webhooks which act as asynchronous notifications, an issuing_authorization.request is a live blocking gateway proxy. Stripe's core routing engine rejected standard Express JSON responses, returning a blank Invalid Stripe API version: protocol error. This occurred because the gateway demands that the application server explicitly prove framework alignment by echoing a version signature in the network transmission headers.
+The Resolution: Programmatically intercepted the exact runtime schema version delivered in the incoming Stripe payload and mirrored it directly back inside the server's HTTP response headers, clearing the gateway's validation wall instantly:
+JavaScript
+const eventVersion = event.api_version || '2023-10-16'; 
+res.setHeader('Stripe-Version', eventVersion);
+res.setHeader('Content-Type', 'application/json');
