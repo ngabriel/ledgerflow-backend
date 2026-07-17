@@ -1,95 +1,50 @@
-Challenges & Technical Discoveries
-Real-time financial networks introduce strict infrastructure constraints not found in standard web apps. Below are the core engineering hurdles encountered and resolved during development:
-1. Defeating the 2-Second Payment Rail Timeout Budget
-The Challenge: Real-time payment networks (Visa/Mastercard via Stripe) enforce a strict 2000ms timeout window on synchronous authorization webhooks. Early testing introduced two compounding latency bottlenecks that shattered this budget: public network routing lag via internet tunnels (ngrok), and blocking database queries where the server waited for Supabase (PostgreSQL) INSERT confirmations before responding to Stripe. This caused transactions to fail automatically on the rail.
-The Resolution: A two-pronged architectural optimization was implemented to squeeze execution time well under the threshold:
-Network Layer: Replaced global public tunnels with the native Stripe CLI client, leveraging its optimized direct event-forwarding daemon to eliminate public internet routing loops.
-Application Layer: Restructured the controller to treat database operations as non-blocking asynchronous tasks. The server immediately fires the compliance handshake (approved: true) back to the banking rail, while the PostgreSQL connection pool writes the transaction logs to Supabase out-of-band as a background worker process.
-2. Synchronous Webhook Compliance & Protocol Version Mirroring
-The Challenge: Unlike 95% of standard webhooks which act as asynchronous notifications, an issuing_authorization.request is a live blocking gateway proxy. Stripe's core routing engine rejected standard Express JSON responses, returning a blank Invalid Stripe API version: protocol error. This occurred because the gateway demands that the application server explicitly prove framework alignment by echoing a version signature in the network transmission headers.
-The Resolution: Programmatically intercepted the exact runtime schema version delivered in the incoming Stripe payload and mirrored it directly back inside the server's HTTP response headers, clearing the gateway's validation wall instantly:
-JavaScript
-const eventVersion = event.api_version || '2023-10-16'; 
-res.setHeader('Stripe-Version', eventVersion);
-res.setHeader('Content-Type', 'application/json');
+Real-Time Transaction Ledger Engine
+A robust backend ledger system built with Node.js, Express, and SQLite that handles synchronous payment data replication and live transaction tracking via the Stripe API and Stripe CLI webhooks.
+This system is designed to perform data synchronization upon system boot and gracefully intercept real-time webhooks to manage local state alongside Stripe’s event streaming.
 
-[💳 Card Swipe / Simulation]
-           │
-           ▼
-┌──────────────────────────┐
-│      Stripe Engine       │ ◄─── (Holds rail open, starts 2s clock)
-└──────────┬───────────────┘
-           │ (Webhook Event Data)
-           ▼
-┌──────────────────────────┐
-│  Stripe CLI Local Daemon │ (Bypasses internet routing lag)
-└──────────┬───────────────┘
-           │ (localhost:3000/webhook)
-           ▼
-┌──────────────────────────┐
-│    Express.js Server     │
-└────┬───────────────┬─────┘
-     │               │
-     │ (Fast-Track)  │ (Async / Off-Rail)
-     ▼               ▼
-┌────────────────┐ ┌──────────────────────────┐
-│  HTTP Response │ │  PostgreSQL Pool Client  │
-│ Status: 200 OK │ │   (Supabase Database)    │
-│ Headers:       │ └─────────────┬────────────┘
-│ Stripe-Version │               │
-│ Body: approved │               ▼
-└────────┬───────┘ ┌──────────────────────────┐
-         │         │ card_authorizations Grid │
-         ▼         └──────────────────────────┘
-[💳 Transaction Cleared]
+Key Features
+Cold-Start DB Synchronization: Automatically fetches, cleans, and updates existing cardholders and card structures from the Stripe API on initial server boot.
+Real-Time Data Sync: Leverages webhook endpoints via Stripe CLI tunnels to listen for downstream updates, immediately mapping account states natively to a local SQLite database.
+Transaction Authorization Lifecycle: Simulates and handles real-time point-of-sale authorizations, updating dynamic ledger data layouts instantly.
 
+Tech Stack
+Runtime Environment: Node.js
+Backend Framework: Express.js
+Database Engine: SQLite (Embedded relational ledger)
+API Integration: Stripe API & Stripe CLI (Webhooks)
 
-Trigger: A cardholder swipes their card (simulated via the Stripe Developer Dashboard Test Panel).
-Network Forwarding: Stripe fires an issuing_authorization.request event payload. The Stripe CLI Daemon intercepts this event and tunnels it directly down to localhost:3000/webhook via an optimized connection.
-Payload Extraction: The Express.js server parses the metadata to capture critical financial telemetry (amount_cents, merchant_name, cardholder_name, and the active transaction status).
-The Split-Path Strategy:
-Path A (Synchronous Response): The server immediately formats a compliant JSON response, mirrors the necessary Stripe-Version network header, and closes the connection with an approved: true body. This occurs in a fraction of a second, easily beating the 2-second threshold.
-Path B (Asynchronous Log): Concurrently, the server hands the query to the pg connection pool. The script does not wait for PostgreSQL to finish writing before responding to Stripe; instead, the connection pool handles the INSERT query to Supabase completely out-of-band in the background.
+Installation & Setup
+1. Prerequisites
+Ensure you have the Stripe CLI installed and authenticated with your test account.
+2. Clone the Repository
+Bash
+git clone https://github.com/ngabriel/YOUR-REPO-NAME.git
+cd YOUR-REPO-NAME
+3. Install Dependencies
+Bash
+npm install
+4. Initialize the Webhook Tunnel
+In a separate terminal window, open a secure tunnel to forward webhook payloads securely to your local port layout:
+Bash
+stripe listen --forward-to localhost:3000/webhook
+5. Boot the Server
+Start your Node server to trigger the initial database boot-sync:
+Bash
+node server.js
 
-Database Schema & Table Setup
-The backend relies on a PostgreSQL instance hosted on Supabase. To track incoming card telemetry without data truncation or type mismatches, the card_authorizations table utilizes precise financial data types (such as tracking currencies in minor-unit integers).
+Testing and API Simulation Examples
+Create a Live Cardholder
+Use the Stripe CLI to provision a new user configuration and witness the real-time SQLite database replication:
+Bash
+stripe post /v1/issuing/cardholders -d name="Michael Jackson" -d email="joseph.rosen@example.com" -d status=active -d type=individual -d "individual[first_name]"="Michael" -d "individual[last_name]"="Jackson" -d "billing[address][line1]"="123 Innovation Way" -d "billing[address][city]"="London" -d "billing[address][postal_code]"="EC1A 1BB" -d "billing[address][country]"="GB" -d phone_number="+447123434789"
+Issue a Virtual Card
+Link a physical or virtual payment asset directly to your newly created cardholder id layout:
+Bash
+stripe post /v1/issuing/cards -d cardholder="YOUR_CARDHOLDER_ID" -d currency=gbp -d type=virtual -d status=active
+Simulate an Authorization Swipe
+Simulate an incoming synchronous point-of-sale purchase ledger adjustment:
+Bash
+stripe post /v1/test_helpers/issuing/authorizations -d card="YOUR_CARD_ID" -d amount=1200 -d currency=gbp
 
-Column Name,Data Type,Constraints,Description
-id,INT4,SERIAL PRIMARY KEY,Auto-incrementing internal record identifier.
-stripe_auth_id,VARCHAR,UNIQUE NOT NULL,The unique iauth_... string generated by Stripe.
-cardholder_name,VARCHAR,NOT NULL,The verified name of the cardholder.
-merchant_name,VARCHAR,NOT NULL,The name of the merchant requesting the funds.
-amount_cents,INT4,NOT NULL,"The transaction volume recorded in cents (e.g., £15.00 = 1500)."
-status,VARCHAR,Default: 'pending',"The real-time evaluation state (pending, closed, declined)."
-decline_reason,VARCHAR,NULLABLE,System-populated audit string if a transaction fails fraud/limits checks.
-created_at,TIMESTAMPTZ,DEFAULT NOW(),Complete timestamp including timezone offsets.
-
-CREATE TABLE card_authorizations (
-    id SERIAL PRIMARY KEY,
-    stripe_auth_id VARCHAR(255) UNIQUE NOT NULL,
-    cardholder_name VARCHAR(255) NOT NULL,
-    merchant_name VARCHAR(255) NOT NULL,
-    amount_cents INTEGER NOT NULL,
-    status VARCHAR(50) DEFAULT 'pending',
-    decline_reason VARCHAR(255),
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Index critical lookup columns to ensure high-speed querying as the dataset grows
-CREATE INDEX idx_stripe_auth_id ON card_authorizations(stripe_auth_id);
-
-
-Challenges & Technical Discoveries
-Real-time financial networks introduce strict infrastructure constraints not found in standard web apps. Below are the core engineering hurdles encountered and resolved during development:
-1. Defeating the 2-Second Payment Rail Timeout Budget
-The Challenge: Real-time payment networks (Visa/Mastercard via Stripe) enforce a strict 2000ms timeout window on synchronous authorization webhooks. Early testing introduced two compounding latency bottlenecks that shattered this budget: public network routing lag via internet tunnels (ngrok), and blocking database queries where the server waited for Supabase (PostgreSQL) INSERT confirmations before responding to Stripe. This caused transactions to fail automatically on the rail.
-The Resolution: A two-pronged architectural optimization was implemented to squeeze execution time well under the threshold:
-Network Layer: Replaced global public tunnels with the native Stripe CLI client, leveraging its optimized direct event-forwarding daemon to eliminate public internet routing loops.
-Application Layer: Restructured the controller to treat database operations as non-blocking asynchronous tasks. The server immediately fires the compliance handshake (approved: true) back to the banking rail, while the PostgreSQL connection pool writes the transaction logs to Supabase out-of-band as a background worker process.
-2. Synchronous Webhook Compliance & Protocol Version Mirroring
-The Challenge: Unlike 95% of standard webhooks which act as asynchronous notifications, an issuing_authorization.request is a live blocking gateway proxy. Stripe's core routing engine rejected standard Express JSON responses, returning a blank Invalid Stripe API version: protocol error. This occurred because the gateway demands that the application server explicitly prove framework alignment by echoing a version signature in the network transmission headers.
-The Resolution: Programmatically intercepted the exact runtime schema version delivered in the incoming Stripe payload and mirrored it directly back inside the server's HTTP response headers, clearing the gateway's validation wall instantly:
-JavaScript
-const eventVersion = event.api_version || '2023-10-16'; 
-res.setHeader('Stripe-Version', eventVersion);
-res.setHeader('Content-Type', 'application/json');
+Authors
+Naomi Gabriel — Full Stack Engineer
